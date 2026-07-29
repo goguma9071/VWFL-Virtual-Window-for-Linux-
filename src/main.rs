@@ -301,14 +301,17 @@ fn setup_kernel_paging(vm: &mut Vm, _krnl_base: u64, hal_base: u64) -> Result<()
         vm.write_memory(entry_addr as usize, &((phys | 0x83).to_le_bytes()))?;
     }
     
-    // --- MMIO (APIC/IOAPIC) ---
+    // --- MMIO (APIC/IOAPIC/HPET) ---
     let pd_mmio_p = paging_pbase + 0x60000; 
     let pt_ioapic_p = paging_pbase + 0x61000; 
+    let pt_hpet_p = paging_pbase + 0x61800; 
     let pt_apic_p = paging_pbase + 0x62000; 
     vm.write_memory((pdpt_high_p + 3*8) as usize, &((pd_mmio_p | 0x3).to_le_bytes())).ok();
     vm.write_memory((pd_mmio_p + 502*8) as usize, &((pt_ioapic_p | 0x3).to_le_bytes())).ok();
-    vm.write_memory((pd_mmio_p + 503*8) as usize, &((pt_apic_p | 0x3).to_le_bytes())).ok();
+    vm.write_memory((pd_mmio_p + 503*8) as usize, &((pt_hpet_p | 0x3).to_le_bytes())).ok();
+    vm.write_memory((pd_mmio_p + 504*8) as usize, &((pt_apic_p | 0x3).to_le_bytes())).ok();
     vm.write_memory(pt_ioapic_p as usize, &((0xFEC00000u64 | 0x1B | nx).to_le_bytes())).ok();
+    vm.write_memory(pt_hpet_p as usize, &((0xFED00000u64 | 0x1B | nx).to_le_bytes())).ok();
     vm.write_memory(pt_apic_p as usize, &((0xFEE00000u64 | 0x1B | nx).to_le_bytes())).ok();
 
     // --- Stack ---

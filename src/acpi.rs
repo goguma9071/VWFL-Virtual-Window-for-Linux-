@@ -6,12 +6,14 @@ pub fn setup(vm: &mut Vm, base_paddr: u64, base_vaddr: u64) -> Result<u64, &'sta
     let xsdt_p = base_paddr + 0x100;
     let madt_p = base_paddr + 0x200;
     let fadt_p = base_paddr + 0x300;
+    let hpet_p = base_paddr + 0x450;
     let dsdt_p = base_paddr + 0x500;
 
     let rsdp_v = base_vaddr;
     let xsdt_v = base_vaddr + 0x100;
     let madt_v = base_vaddr + 0x200;
     let fadt_v = base_vaddr + 0x300;
+    let hpet_v = base_vaddr + 0x450;
     let dsdt_v = base_vaddr + 0x500;
 
     // 1. DSDT (Minimal)
@@ -68,11 +70,23 @@ pub fn setup(vm: &mut Vm, base_paddr: u64, base_vaddr: u64) -> Result<u64, &'sta
     update_checksum(&mut fadt);
     vm.write_memory(fadt_p as usize, &fadt)?;
 
-    // 4. XSDT
-    let mut xsdt = vec![0u8; 36 + 16];
-    write_header(&mut xsdt, b"XSDT", 36 + 16, 1);
+    // 4. HPET Table
+    let mut hpet = vec![0u8; 56];
+    write_header(&mut hpet, b"HPET", 56, 1);
+    hpet[36..40].copy_from_slice(&0x8086a201u32.to_le_bytes()); 
+    hpet[40] = 0; hpet[41] = 64; hpet[42] = 0; hpet[43] = 0;
+    hpet[44..52].copy_from_slice(&0x00000000FED00000u64.to_le_bytes());
+    hpet[52] = 0;
+    hpet[53..55].copy_from_slice(&0x0080u16.to_le_bytes());
+    update_checksum(&mut hpet);
+    vm.write_memory(hpet_p as usize, &hpet)?;
+
+    // 5. XSDT
+    let mut xsdt = vec![0u8; 36 + 24];
+    write_header(&mut xsdt, b"XSDT", 36 + 24, 1);
     xsdt[36..44].copy_from_slice(&fadt_v.to_le_bytes()); 
     xsdt[44..52].copy_from_slice(&madt_v.to_le_bytes()); 
+    xsdt[52..60].copy_from_slice(&hpet_v.to_le_bytes());
     update_checksum(&mut xsdt);
     vm.write_memory(xsdt_p as usize, &xsdt)?;
 

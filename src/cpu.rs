@@ -1,7 +1,7 @@
 use crate::vm::Vm;
 use kvm_ioctls::VcpuExit;
 use kvm_bindings::{kvm_msr_entry, Msrs};
-use std::io::{self, Write};
+use std::io::{self, Write, Read};
 use crate::debug;
 use std::net::{TcpListener, TcpStream};
 use gdbstub::stub::GdbStub;
@@ -10,13 +10,22 @@ use gdbstub::stub::{BaseStopReason, DisconnectReason};
 use crate::gdb::{VwflTarget, GdbResumeAction};
 use gdbstub::common::Tid;
 use std::marker::PhantomData;
-use gdbstub::conn::{Connection, ConnectionExt};  
+use gdbstub::conn::{Connection, ConnectionExt};
+use std::time::{Instant, Duration};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 struct ApicState {
     tpr: u32,
     svr: u32,
     lvt_timer: u32,
     init_count: u32,
+}
+
+struct HpetState {
+    config: u64,
+    counter: u64,
 }
 
 static mut APIC: ApicState = ApicState {
@@ -26,10 +35,57 @@ static mut APIC: ApicState = ApicState {
     init_count: 0,
 };
 
+static mut HPET: HpetState = HpetState { config: 0, counter: 0 };
+static mut START_TIME: Option<Instant> = None;
+
+lazy_static::lazy_static! {
+    static ref SERIAL_IN_QUEUE: Arc<Mutex<VecDeque<u8>>> = Arc::new(Mutex::new(VecDeque::new()));
+    static ref WINDBG_STREAM: Arc<Mutex<Option<TcpStream>>> = Arc::new(Mutex::new(None));
+}
+
 pub fn run(vm: &mut Vm, krnl_entry_v: u64, stack_v: u64, lpb_v: u64) -> Result<(), Box<dyn std::error::Error>> {
     println!("[CPU] Initializing vCPU state...");
+    unsafe { START_TIME = Some(Instant::now()); }
+    
+    start_windbg_server();
+    
     setup_long_mode(vm, krnl_entry_v, stack_v, lpb_v)?;
     run_gdb_server(vm)
+}
+
+fn start_windbg_server() {
+    thread::spawn(|| {
+        let listener = match TcpListener::bind("0.0.0.0:1235") {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        println!("[WINDBG] Bridge ready on 0.0.0.0:1235 (TCP)");
+        for stream in listener.incoming() {
+            if let Ok(mut s) = stream {
+                println!("[WINDBG] WinDbg connected to bridge.");
+                s.set_nonblocking(true).ok();
+                let s_clone = s.try_clone().unwrap();
+                *WINDBG_STREAM.lock().unwrap() = Some(s);
+                
+                let mut reader = s_clone;
+                thread::spawn(move || {
+                    let mut buf = [0u8; 1024];
+                    loop {
+                        // std::io::Read::read를 명시적으로 호출하여 충돌 해결
+                        if let Ok(n) = std::io::Read::read(&mut reader, &mut buf) {
+                            if n > 0 {
+                                let mut queue = SERIAL_IN_QUEUE.lock().unwrap();
+                                for i in 0..n { queue.push_back(buf[i]); }
+                            } else { break; }
+                        }
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    println!("[WINDBG] WinDbg disconnected.");
+                    *WINDBG_STREAM.lock().unwrap() = None;
+                });
+            }
+        }
+    });
 }
 
 fn run_gdb_server(vm: &mut Vm) -> Result<(), Box<dyn std::error::Error>> {
@@ -39,7 +95,6 @@ fn run_gdb_server(vm: &mut Vm) -> Result<(), Box<dyn std::error::Error>> {
     
     let (stream, addr) = listener.accept()?;
     println!("GDB Client Connected: {}", addr);
-    
     stream.set_nonblocking(true)?;
 
     let mut target = VwflTarget { vm, resume_action: None };
@@ -50,7 +105,6 @@ fn run_gdb_server(vm: &mut Vm) -> Result<(), Box<dyn std::error::Error>> {
         DisconnectReason::Kill => println!("[GDB] Killed by client."),
         _ => println!("[GDB] Stopped."),
     }
-
     Ok(())
 }
 
@@ -68,22 +122,31 @@ impl<'a> BlockingEventLoop for VwflEventLoop<'a> {
         conn: &mut Self::Connection,
     ) -> Result<GdbEvent<Self::StopReason>, WaitForStopReasonError<&'static str, std::io::Error>> {
         let mut loop_count: u64 = 0;
+        let mut last_tick = Instant::now();
+        let tick_interval = Duration::from_millis(10); 
         
         loop {
             loop_count += 1;
             
-            // [FIX] gdbstub::conn::Connection 규격에 맞게 수정
-            match conn.peek().map_err(WaitForStopReasonError::Connection)? {
+            // ConnectionExt::peek/read를 명시적으로 호출
+            match ConnectionExt::peek(conn).map_err(WaitForStopReasonError::Connection)? {
                 Some(byte) => {
-                    // 데이터가 있으면 읽어서 소모하고 IncomingData로 보고
-                    let _ = conn.read().map_err(WaitForStopReasonError::Connection)?;
+                    let _ = ConnectionExt::read(conn).map_err(WaitForStopReasonError::Connection)?;
                     return Ok(GdbEvent::IncomingData(byte));
                 }
                 None => {}
             }
 
-            if loop_count % 1000 == 0 {
+            let now = Instant::now();
+            if now.duration_since(last_tick) >= tick_interval {
                 update_windows_time(target.vm, loop_count);
+                if let Ok(regs) = target.vm.vcpu_fd.get_regs() {
+                    if (regs.rflags & 0x200) != 0 {
+                        target.vm.vm_fd.set_irq_line(2, true).ok();
+                        target.vm.vm_fd.set_irq_line(2, false).ok();
+                    }
+                }
+                last_tick = now;
             }
 
             {
@@ -94,11 +157,16 @@ impl<'a> BlockingEventLoop for VwflEventLoop<'a> {
             let exit = target.vm.vcpu_fd.run().map_err(|_| WaitForStopReasonError::Target("KVM Run Error"))?;
 
             match exit {
-                VcpuExit::Debug(_) => {
-                    return Ok(GdbEvent::TargetStopped(BaseStopReason::DoneStep));
-                }
-                VcpuExit::IrqWindowOpen => {
-                    continue;
+                VcpuExit::Debug(_) => return Ok(GdbEvent::TargetStopped(BaseStopReason::DoneStep)),
+                VcpuExit::IrqWindowOpen => continue,
+                VcpuExit::IoIn(addr, data) => {
+                    if addr == 0x3F8 {
+                        let mut queue = SERIAL_IN_QUEUE.lock().unwrap();
+                        data[0] = queue.pop_front().unwrap_or(0);
+                    } else if addr == 0x3FD {
+                        let queue = SERIAL_IN_QUEUE.lock().unwrap();
+                        data[0] = if queue.is_empty() { 0x60 } else { 0x61 };
+                    }
                 }
                 VcpuExit::IoOut(addr, data) => {
                     let val = data[0];
@@ -106,19 +174,22 @@ impl<'a> BlockingEventLoop for VwflEventLoop<'a> {
                         debug::handle_diagnostic_trap(target.vm, val).ok();
                         return Ok(GdbEvent::TargetStopped(BaseStopReason::Signal(gdbstub::common::Signal::SIGTRAP)));
                     }
-                    if addr == 0x3F8 { print!("{}", val as char); io::stdout().flush().ok(); }
+                    if addr == 0x3F8 {
+                        print!("{}", val as char); io::stdout().flush().ok();
+                        if let Some(ref mut s) = *WINDBG_STREAM.lock().unwrap() {
+                            // std::io::Write::write_all을 명시적으로 호출
+                            std::io::Write::write_all(s, &[val]).ok();
+                        }
+                    }
                 }
-                VcpuExit::MmioRead(addr, data) => {
-                    handle_mmio_read(addr, data, loop_count);
-                }
-                VcpuExit::MmioWrite(addr, data) => {
-                    handle_mmio_write(addr, data);
-                }
+                VcpuExit::MmioRead(addr, data) => handle_mmio_read(addr, data, loop_count),
+                VcpuExit::MmioWrite(addr, data) => handle_mmio_write(addr, data),
+                // X86Msr 대신 Msr을 시도하거나, 컴파일러가 제안하는 정확한 이름을 사용해야 함
+                // 일단 로그를 위해 Unknown으로 남겨두거나, 버전에 맞는 처리를 수행
                 VcpuExit::Hlt => continue,
-                VcpuExit::Shutdown => {
-                    return Ok(GdbEvent::TargetStopped(BaseStopReason::Signal(gdbstub::common::Signal::SIGSEGV)));
-                }
+                VcpuExit::Shutdown => return Ok(GdbEvent::TargetStopped(BaseStopReason::Signal(gdbstub::common::Signal::SIGSEGV))),
                 _ => {
+                    // MSR 처리가 필요한 경우를 위해 매치 암(match arm)을 좀 더 유연하게 작성
                     return Ok(GdbEvent::TargetStopped(BaseStopReason::Signal(gdbstub::common::Signal::SIGTRAP)));
                 }
             }
@@ -154,6 +225,25 @@ fn handle_mmio_read(addr: u64, data: &mut [u8], loop_count: u64) {
             let len = data.len().min(4);
             data[..len].copy_from_slice(&bytes[..len]);
         }
+    } else if addr >= 0xfed00000 && addr <= 0xfed003ff {
+        unsafe {
+            let val = match addr & 0x3FF {
+                0x00 => 0x8086a20100000001u64, 
+                0x10 => HPET.config,
+                0xF0 => {
+                    if let Some(start) = START_TIME {
+                        let elapsed = start.elapsed().as_nanos() as u64;
+                        elapsed * 1000000 
+                    } else {
+                        loop_count * 100000
+                    }
+                },
+                _ => 0,
+            };
+            let len = data.len();
+            if len == 8 { data.copy_from_slice(&val.to_le_bytes()); }
+            else if len == 4 { data.copy_from_slice(&(val as u32).to_le_bytes()); }
+        }
     }
 }
 
@@ -165,6 +255,17 @@ fn handle_mmio_write(addr: u64, data: &[u8]) {
                 0x80 => APIC.tpr = val, 0xF0 => APIC.svr = val,
                 0x320 => APIC.lvt_timer = val, 0x380 => APIC.init_count = val,
                 _ => {}
+            }
+        }
+    } else if addr >= 0xfed00000 && addr <= 0xfed003ff {
+        unsafe {
+            if data.len() >= 4 {
+                let val = u32::from_le_bytes(data[0..4].try_into().unwrap_or([0;4]));
+                match addr & 0x3FF {
+                    0x10 => HPET.config = val as u64,
+                    0xF0 => HPET.counter = val as u64,
+                    _ => {}
+                }
             }
         }
     }
@@ -180,8 +281,13 @@ fn setup_long_mode(vm: &mut Vm, krnl_entry_v: u64, stack_v: u64, lpb_v: u64) -> 
     
     let mut cpuid = vm.kvm.get_supported_cpuid(kvm_bindings::KVM_MAX_CPUID_ENTRIES)?;
     for entry in cpuid.as_mut_slice() {
-        if entry.function == 0x1 { entry.ecx &= !(1 << 31); entry.ecx &= !(1 << 21); }
-        if entry.function == 0x40000000 { entry.ebx = 0; entry.ecx = 0; entry.edx = 0; }
+        if entry.function == 0x1 { 
+            entry.ecx &= !(1 << 31); 
+            entry.ecx &= !(1 << 21); 
+        }
+        if entry.function == 0x40000000 { 
+            entry.ebx = 0; entry.ecx = 0; entry.edx = 0; 
+        }
     }
     vm.vcpu_fd.set_cpuid2(&cpuid)?;
 
