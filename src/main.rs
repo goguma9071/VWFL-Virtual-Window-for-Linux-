@@ -245,9 +245,19 @@ fn main() {
     let mem_head_v = LPB_VBASE + 0x20;
     let md_v: [u64; 7] = [ LPB_VBASE + 0x20000, LPB_VBASE + 0x21000, LPB_VBASE + 0x22000, LPB_VBASE + 0x23000, LPB_VBASE + 0x24000, LPB_VBASE + 0x25000, LPB_VBASE + 0x26000 ];
     let md_p: [u64; 7] = [ LPB_PBASE + 0x20000, LPB_PBASE + 0x21000, LPB_PBASE + 0x22000, LPB_PBASE + 0x23000, LPB_PBASE + 0x24000, LPB_PBASE + 0x25000, LPB_PBASE + 0x26000 ];
-    let base_map: [u64; 7] = [ 0x0, 0x1000, 0x200000, 0x2000000, 0x4000000, 0x4200000, 0x4200000 + ((hive_size as u64 + 0xFFF) & !0xFFF) ];
-    let size_map: [u64; 7] = [ 0x1000, 0x1FF000, 0x1E00000, 0x2000000, 0x200000, hive_size as u64, MEM_SIZE as u64 - (0x4200000 + ((hive_size as u64 + 0xFFF) & !0xFFF)) ];
-    let type_map: [u32; 7] = [1, 0, 7, 8, 15, 15, 0]; 
+    let base_map: [u64; 9] = [ 0x0, 0x1000, 0x200000, 0x2000000, 0x4000000, 0x4200000, 0x4200000 + ((hive_size as u64 + 0xFFF) & !0xFFF), 0x8000000, 0xC000000 ];
+    let size_map: [u64; 9] = [ 0x1000, 0x1FF000, 0x1E00000, 0x2000000, 0x200000, hive_size as u64, MEM_SIZE as u64 - (0x4200000 + ((hive_size as u64 + 0xFFF) & !0xFFF)), 0x4000000, MEM_SIZE as u64 - 0xC000000 ];
+    let type_map: [u32; 9] = [
+        1, // LoaderExceptionBlock
+        0, // LoaderFree
+        7, //LoaderOSloaderHeap
+        8, //LoaderRegistryData
+        15, // LoaderMemoryData
+        15, // LoaderMemoryData (Hive)
+        0, // LoaderFree
+        15, // LoaderMemoryData (Page Table, GDT, Stack etc)
+        0  // LoaderFree
+        ]; 
 
     for i in 0..7 {
         LoaderParameterBlock::add_memory(&mut vm, LPB_VBASE, LPB_PBASE, md_v[i], md_p[i], base_map[i], size_map[i], type_map[i]).ok();
