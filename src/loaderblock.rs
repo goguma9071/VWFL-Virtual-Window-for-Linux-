@@ -300,7 +300,7 @@ impl LoaderParameterBlock {
         lpb.NlsData = nls_v;
         lpb.Extension = lpb_v + 0x8000;
         
-        let options_str = "/DEBUG /DEBUGPORT=COM1 /BAUDRATE=115200 /EMS"; 
+        let options_str = ""; //"/DEBUG /DEBUGPORT=COM1 /BAUDRATE=115200 /EMS"; 
         let mut options_bytes = options_str.as_bytes().to_vec();
         options_bytes.push(0);
         vm.write_memory((lpb_p + 0xC000) as usize, &options_bytes).ok();

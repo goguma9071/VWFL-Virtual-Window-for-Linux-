@@ -53,6 +53,8 @@ pub fn run(vm: &mut Vm, krnl_entry_v: u64, stack_v: u64, lpb_v: u64) -> Result<(
     run_gdb_server(vm)
 }
 
+
+// Windbg 브릿지 서버인데 이게 맞나? 더 case를 나눠서 처리해야 할 수도 있음.(명령어에 따라) 일단은 TCP로 연결만 받아서 SERIAL_IN_QUEUE에 넣는 역할만 수행만 하게 만들어 놓은 것 같음. 아마도?
 fn start_windbg_server() {
     thread::spawn(|| {
         let listener = match TcpListener::bind("0.0.0.0:1235") {

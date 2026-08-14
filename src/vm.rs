@@ -54,6 +54,8 @@ impl Vm {
         vm_fd.set_identity_map_address(0xfffbc000)?;
         vm_fd.create_irq_chip()?;
         
+        /* 
+
         // [NEW] Enable Userspace MSR exits to log kernel's system register usage
         if kvm.check_extension(kvm_ioctls::Cap::X86UserSpaceMsr) {
             let mut cap = kvm_bindings::kvm_enable_cap {
@@ -64,6 +66,8 @@ impl Vm {
             vm_fd.enable_cap(&cap)?;
             println!("[VM] Userspace MSR exits enabled.");
         }
+
+        */
 
         let pit_config = kvm_bindings::kvm_pit_config::default();
         vm_fd.create_pit2(pit_config)?;

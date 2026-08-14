@@ -4,6 +4,18 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
+
+// Function to process debug commands from Windbg client
+void process_debug_command(const char* buffer, int socket_fd) {
+    // Implement command parsing logic here
+    printf("Processing command: %s\n", buffer);
+    
+    // Example: Echo back the received message
+    if (send(socket_fd, buffer, strlen(buffer), 0) == -1) {
+        perror("Failed to send response");
+    }
+}
 
 // Function to handle individual client connections
 void handle_client(int new_socket) {
@@ -75,7 +87,7 @@ int main() {
         }
         
         printf("New connection from %s\n",
-               inet_ntoa(client_addr.sin_addr));
+               inet_ntop(AF_INET, &(client_addr.sin_addr), NULL, sizeof(client_addr.sin_addr)));
         
         // Handle the new connection in a separate thread/process
         handle_client(new_socket);

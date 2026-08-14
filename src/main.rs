@@ -70,6 +70,19 @@ fn main() {
     let hal_mod = &kloader.modules[1];
     let krnl_entry_v = krnl_mod.entry;
 
+    // MmPtebase Dynamic Patch: Window 10 KASLR
+
+    let mm_pte_base_offset = 0xCFB358; // 기드라에서 확인한 전역 변수 오프셋
+    let mm_pte_base_paddr = KRNL_PBASE + mm_pte_base_offset;
+
+    //고정 PML4 인덱스 (493번 = 0xFFFFF680...)
+    let pml4_index: u64 = 493; 
+    let pte_base_vaddr: u64 = 0xFFFF000000000000 | (pml4_index << 39); // 0xFFFFF68000000000
+
+    // 커널 물리 메모리에 직접 Write
+    vm.write_memory(mm_pte_base_paddr as usize, &pte_base_vaddr.to_le_bytes()).expect("Failed to patch MmPteBase");
+    println!("[LOADER] Patched MmPteBase at Phys: 0x{:x} with Value: 0x{:016x}", mm_pte_base_paddr, pte_base_vaddr);
+
     // 2. 페이지 테이블 구축
     setup_kernel_paging(&mut vm, krnl_mod.v_base, hal_mod.v_base).expect("Paging failed");
 

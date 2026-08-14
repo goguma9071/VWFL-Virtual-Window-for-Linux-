@@ -242,7 +242,7 @@ impl PeFile {
 
                 functions.push(ImportFunction {
                     name: func_name,
-                    iat_rva: iat_rva_curr, // 여기에 나중에 실제 주소를 써야 함
+                    iat_rva: iat_rva_curr, // 이 로직이 IAT에 실제 주소를 적어야 하는 RVA를 제공함.
                 });
 
                 thunk_rva += 8;
